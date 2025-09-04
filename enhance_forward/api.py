@@ -99,16 +99,6 @@ Respond with the original prompt if no improvements are needed.
 
         chat_request['messages'][-1]['content'] = cleanup_result.choices[0].message.content
 
-        # Extract content from <prompt> tags if present
-        # extracted_prompt = extract_prompt_content(prompt)
-        # if extracted_prompt is not None:
-        #     # Clean the extracted content and update the message
-        #     cleaned_prompt = clean_prompt_content(extracted_prompt)
-        #     chat_request['messages'][-1]['content'] = cleaned_prompt
-        #     print(f"📝 Extracted prompt from tags: {cleaned_prompt}")
-        # else:
-        #     print(f"📝 Original prompt (no tags): {prompt}")
-
         result = await openai_client.chat.completions._post(
             "/chat/completions",
             body=chat_request,
