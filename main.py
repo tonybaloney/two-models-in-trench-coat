@@ -33,9 +33,11 @@ async def lifespan(app: FastAPI):
     otel_endpoint = os.getenv("OTLP_GRPC_ENDPOINT") # e.g. "http://localhost:4317"
     if otel_endpoint:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.instrumentation.openai import OpenAIInstrumentor
 
-        configure_otel_otlp("my-service-name", endpoint=otel_endpoint)
-        FastAPIInstrumentor.instrument_app(app)
+        trace_provider = configure_otel_otlp("enhance-forward", endpoint=otel_endpoint)
+        FastAPIInstrumentor.instrument_app(app, tracer_provider=trace_provider)
+        OpenAIInstrumentor().instrument()
 
         print("✅ OpenTelemetry configured")
     else:

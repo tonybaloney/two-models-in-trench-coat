@@ -26,7 +26,8 @@ dependencies = [
     "openai>=1.0.0",
     "opentelemetry-distro",
     "opentelemetry-exporter-otlp-proto-grpc",
-    "opentelemetry-instrumentation-fastapi"
+    "opentelemetry-instrumentation-fastapi",
+    "opentelemetry-instrumentation-openai"
 ]
 
 [project.urls]

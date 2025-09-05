@@ -47,5 +47,5 @@ uvicorn main:app --reload --port 8080
 ### Running tracing dashboard
 
 ```bash
-docker run --rm -it -p 18888:18888 -p 4317:18889 -d --name aspire-dashboard mcr.microsoft.com/dotnet/aspire-dashboard:9.4
+docker run --rm -it -p 18888:18888 -p 4317:18889 -e DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS='true' -d --name aspire-dashboard mcr.microsoft.com/dotnet/aspire-dashboard:9.4
 ```

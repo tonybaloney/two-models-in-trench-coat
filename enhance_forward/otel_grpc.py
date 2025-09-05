@@ -53,3 +53,4 @@ def configure_otel_otlp(service_name: str = "enhance-forward", endpoint: str = "
 
     # Attach OTLP handler to root logger
     logging.getLogger().addHandler(handler)
+    return traceProvider
