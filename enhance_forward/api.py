@@ -18,7 +18,7 @@ from opentelemetry.semconv_ai import (
 from opentelemetry.trace import SpanKind
 import logging
 import re
-
+from opentelemetry.instrumentation.openai.shared import chat_wrappers
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -219,6 +219,8 @@ async def create_chat_completion(
                 span.set_attribute(SpanAttributes.LLM_REQUEST_MODEL, chat_request['model'])
                 span.set_attribute(SpanAttributes.LLM_REQUEST_MAX_TOKENS, chat_request.get('max_tokens', 0))
                 span.set_attribute(SpanAttributes.LLM_REQUEST_TEMPERATURE, chat_request.get('temperature', 1.0))
+
+                await chat_wrappers._set_prompts(span, chat_request['messages'])
 
                 # TODO: this is a hack to retain all the original context, 
                 # it breaks some of the tracing
