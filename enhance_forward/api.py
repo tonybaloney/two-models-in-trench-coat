@@ -17,6 +17,7 @@ from opentelemetry.semconv_ai import (
 )
 from opentelemetry.trace import SpanKind
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -50,6 +51,12 @@ def get_openai_client(request: Request) -> AsyncOpenAI:
     return client
 
 
+def get_last_user_request(text):
+    matches = re.findall(r"<userRequest>(.*?)</userRequest>", text, re.DOTALL)
+    if matches:
+        return matches[-1]
+    return None
+
 @router.post("/v1/chat/completions")
 async def create_chat_completion(
     request: Request, 
@@ -69,6 +76,7 @@ async def create_chat_completion(
             chat_request['model'] = full_deployment
             
             prompt = chat_request['messages'][-1]['content']
+            user_request = get_last_user_request(prompt)
             
             # Do cleanup pass with tool calls for clarification
             cleanup_tools: List[ChatCompletionToolParam] = [
@@ -136,7 +144,7 @@ async def create_chat_completion(
                 {"role": "tool", "tool_call_id": "call_example", "content": "Clarification requested due to contradictory requirements."},
                 
                 # The actual user prompt to process
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": user_request}
             ]
 
             cleanup_result = await openai_client.chat.completions.create(
@@ -195,22 +203,22 @@ async def create_chat_completion(
             
             # If no tool call or regular response, use the cleaned content
             cleaned_content = choice.message.content or prompt
-            span.set_attribute("original_prompt", prompt)
             span.set_attribute("cleaned_content", cleaned_content)
             span.add_event("cleaned_prompt", {"cleaned_content": cleaned_content})
 
             logger.info(f"🧹 Cleaned up prompt: {cleaned_content}")
+            span.set_attribute("original_prompt", prompt)
 
-            chat_request['messages'][-1]['content'] = cleaned_content
+            chat_request['messages'][-1]['content'] = chat_request['messages'][-1]['content'].replace(user_request, cleaned_content)
 
             with tracer.start_span(
                 "openai.chat",
                 kind=SpanKind.CLIENT,
                 attributes={SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value},
             ) as span:
-                span.set_attribute("model", chat_request['model'])
-                span.set_attribute("messages", chat_request['messages'])
-                span.set_attribute("temperature", chat_request.get('temperature', 1.0))
+                span.set_attribute(SpanAttributes.LLM_REQUEST_MODEL, chat_request['model'])
+                span.set_attribute(SpanAttributes.LLM_REQUEST_MAX_TOKENS, chat_request.get('max_tokens', 0))
+                span.set_attribute(SpanAttributes.LLM_REQUEST_TEMPERATURE, chat_request.get('temperature', 1.0))
 
                 # TODO: this is a hack to retain all the original context, 
                 # it breaks some of the tracing
