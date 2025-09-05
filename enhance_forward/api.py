@@ -11,7 +11,11 @@ from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletio
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
 from fastapi.responses import StreamingResponse
 from opentelemetry import trace
-
+from opentelemetry.semconv_ai import (
+    LLMRequestTypeValues,
+    SpanAttributes,
+)
+from opentelemetry.trace import SpanKind
 import logging
 
 logger = logging.getLogger(__name__)
@@ -95,9 +99,11 @@ async def create_chat_completion(
             cleanup_prompt = """Given the user's prompt, improve it following these guidelines:
     - Translate any text which is not English into English, whilst retaining the original meaning and keeping technical terms like "Python" or anything in backticks as-is.
     - Fix any spelling or grammatical errors.
-    - If there are contradictory instructions, resolve them in a sensible way.
+    - If there are contradictory instructions, resolve them in a sensible way and explain your reasoning in the response.
     - If you cannot resolve contradictions, use the request_clarification tool to ask for clarification.
     - Respond with the improved prompt if improvements were made, or the original prompt if no improvements are needed.
+    - Do not make any other changes.
+    - Do no other actions like generate code or answer questions. Only improve the prompt text.
     """
 
             # Few-shot examples to demonstrate both tool usage and regular improvements
@@ -127,6 +133,7 @@ async def create_chat_completion(
                         }
                     }
                 ]},
+                {"role": "tool", "tool_call_id": "call_example", "content": "Clarification requested due to contradictory requirements."},
                 
                 # The actual user prompt to process
                 {"role": "user", "content": prompt}
@@ -137,7 +144,7 @@ async def create_chat_completion(
                 messages=few_shot_messages,
                 tools=cleanup_tools,
                 tool_choice="auto",
-                temperature=0.0,
+                temperature=0.3,
                 stream=False,
             )
 
@@ -196,18 +203,29 @@ async def create_chat_completion(
 
             chat_request['messages'][-1]['content'] = cleaned_content
 
-            result = await openai_client.chat.completions._post(
-                "/chat/completions",
-                body=chat_request,
-                cast_to=ChatCompletion,
-                stream=True,
-                stream_cls=AsyncStream[ChatCompletionChunk],
-            )
+            with tracer.start_span(
+                "openai.chat",
+                kind=SpanKind.CLIENT,
+                attributes={SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value},
+            ) as span:
+                span.set_attribute("model", chat_request['model'])
+                span.set_attribute("messages", chat_request['messages'])
+                span.set_attribute("temperature", chat_request.get('temperature', 1.0))
 
-            async def event_generator():
-                async for chunk in result:
-                    yield f"data: {chunk.model_dump_json()}\n\n"
-            return StreamingResponse(event_generator(), media_type="text/event-stream")
+                # TODO: this is a hack to retain all the original context, 
+                # it breaks some of the tracing
+                result = await openai_client.chat.completions._post(
+                    "/chat/completions",
+                    body=chat_request,
+                    cast_to=ChatCompletion,
+                    stream=True,
+                    stream_cls=AsyncStream[ChatCompletionChunk],
+                )
+
+                async def event_generator():
+                    async for chunk in result:
+                        yield f"data: {chunk.model_dump_json()}\n\n"
+                return StreamingResponse(event_generator(), media_type="text/event-stream")
 
             
         except Exception as e:
