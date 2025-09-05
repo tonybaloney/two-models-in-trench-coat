@@ -3,12 +3,19 @@ API routes and endpoints for the FastAPI application.
 """
 
 import os
-from typing import Any, Optional, List
+import json
+from typing import Any, List
 from fastapi import APIRouter, Request, HTTPException
 from openai import AsyncOpenAI, AsyncStream
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionToolParam
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
 from fastapi.responses import StreamingResponse
+
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 router = APIRouter()
 
 mini_deployment = os.environ['MINI_DEPLOYMENT']
@@ -55,49 +62,102 @@ async def create_chat_completion(
         
         prompt = chat_request['messages'][-1]['content']
         
-        # Do cleanup pass
+        # Do cleanup pass with tool calls for clarification
+        cleanup_tools: List[ChatCompletionToolParam] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "request_clarification",
+                    "description": "Request clarification when vague or contradictory instructions cannot be resolved",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "clarification_question": {
+                                "type": "string",
+                                "description": "The question asking for clarification about the instructions"
+                            },
+                            "contradictions_found": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of the vague or contradictory instructions that were found"
+                            }
+                        },
+                        "required": ["clarification_question", "contradictions_found"]
+                    }
+                }
+            }
+        ]
 
-        cleanup_prompt = f"""Given the prompt provided inside the <prompt> tags, improve the prompt and do no other actions like generate code or answer questions.
+        cleanup_prompt = """Given the user's prompt, improve it following these guidelines:
 - Translate any text which is not English into English, whilst retaining the original meaning and keeping technical terms like "Python" or anything in backticks as-is.
 - Fix any spelling or grammatical errors.
 - If there are contradictory instructions, resolve them in a sensible way.
-- If you cannot resolve contradictions, response with a question asking for clarification and the tag {NEEDS_CLARIFICATION} at the end of your response.
-Respond with the original prompt if no improvements are needed.
-        """
+- If you cannot resolve contradictions, use the request_clarification tool to ask for clarification.
+- Respond with the improved prompt if improvements were made, or the original prompt if no improvements are needed.
+"""
+
         cleanup_result = await openai_client.chat.completions.create(
             model=mini_deployment,
             messages=[
                 {"role": "system", "content": cleanup_prompt},
                 {"role": "user", "content": prompt}
             ],
+            tools=cleanup_tools,
+            tool_choice="auto",
             temperature=0.0,
-            # max_tokens=1000,
-            stream=False
+            stream=False,
         )
 
-        print(f"🧹 Cleaned up prompt: {cleanup_result.choices[0].message.content}")
+        # Check if the model used the clarification tool
+        choice = cleanup_result.choices[0]
+        if choice.message.tool_calls:
+            # Model called a tool - check if it's our clarification tool
+            for tool_call in choice.message.tool_calls:
+                # Handle different tool call types safely
+                tool_name = getattr(getattr(tool_call, 'function', None), 'name', None)
+                if tool_name == "request_clarification":
+                    try:
+                        tool_args_str = getattr(getattr(tool_call, 'function', None), 'arguments', '{}')
+                        tool_args = json.loads(tool_args_str)
+                        clarification_question = tool_args.get("clarification_question", "Please clarify your request.")
+                        contradictions = tool_args.get("contradictions_found", [])
+                        
+                        logger.info(f"❓ Needs clarification: {clarification_question}")
+                        logger.info(f"📝 Contradictions found: {contradictions}")
 
-        if NEEDS_CLARIFICATION in cleanup_result.choices[0].message.content:
-            print("❓ Needs clarification, stopping here.")
-            async def clarification_generator():
-                chunk = ChatCompletionChunk(
-                    id=cleanup_result.id,
-                    created=cleanup_result.created,
-                    choices=[ChunkChoice(
-                        index=i, 
-                        delta=ChoiceDelta(content=choice.message.content.replace(NEEDS_CLARIFICATION, '')),
-                        finish_reason='stop') for i, choice in enumerate(cleanup_result.choices)],
-                    usage=cleanup_result.usage,
-                    object='chat.completion.chunk',
-                    model=mini_deployment
-                )
-                yield f"data: {chunk.model_dump_json()}\n\n"
-            return StreamingResponse(
-                content=clarification_generator(),
-                media_type="text/event-stream"
-            )
+                        # Format a nice clarification response
+                        clarification_response = f"{clarification_question}\n\nContradictions found:\n"
+                        for i, contradiction in enumerate(contradictions, 1):
+                            clarification_response += f"{i}. {contradiction}\n"
+                        
+                        async def clarification_generator():
+                            chunk = ChatCompletionChunk(
+                                id=cleanup_result.id,
+                                created=cleanup_result.created,
+                                choices=[ChunkChoice(
+                                    index=0, 
+                                    delta=ChoiceDelta(content=clarification_response),
+                                    finish_reason='stop'
+                                )],
+                                usage=cleanup_result.usage,
+                                object='chat.completion.chunk',
+                                model=mini_deployment
+                            )
+                            yield f"data: {chunk.model_dump_json()}\n\n"
+                        
+                        return StreamingResponse(
+                            content=clarification_generator(),
+                            media_type="text/event-stream"
+                        )
+                    except (json.JSONDecodeError, AttributeError) as e:
+                        logger.warning(f"⚠️ Failed to parse clarification tool: {e}")
+                        break
+        
+        # If no tool call or regular response, use the cleaned content
+        cleaned_content = choice.message.content or prompt
+        logger.info(f"🧹 Cleaned up prompt: {cleaned_content}")
 
-        chat_request['messages'][-1]['content'] = cleanup_result.choices[0].message.content
+        chat_request['messages'][-1]['content'] = cleaned_content
 
         result = await openai_client.chat.completions._post(
             "/chat/completions",
