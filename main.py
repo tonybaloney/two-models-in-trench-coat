@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from openai import AsyncAzureOpenAI
 from enhance_forward.api import router as api_router
+from enhance_forward.otel_grpc import configure_otel_otlp
+
 
 
 @asynccontextmanager
@@ -28,6 +30,17 @@ async def lifespan(app: FastAPI):
     )
     print("✅ OpenAI client initialized")
     
+    otel_endpoint = os.getenv("OTLP_GRPC_ENDPOINT") # e.g. "http://localhost:4317"
+    if otel_endpoint:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        configure_otel_otlp("my-service-name", endpoint=otel_endpoint)
+        FastAPIInstrumentor.instrument_app(app)
+
+        print("✅ OpenTelemetry configured")
+    else:
+        print("⚠️ OTLP_GRPC_ENDPOINT not set, skipping OpenTelemetry configuration")
+
     yield
     
     # Shutdown
